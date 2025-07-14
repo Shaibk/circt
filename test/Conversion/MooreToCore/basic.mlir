@@ -1111,22 +1111,18 @@ func.func @Conversions(%arg0: !moore.i16, %arg1: !moore.l16) {
 
 // CHECK-LABEL: func.func @PowUOp
 func.func @PowUOp(%arg0: !moore.l32, %arg1: !moore.l32) {
-  // CHECK: %{{.*}} = scf.for %{{.*}} = %{{.*}} to %arg1 step %{{.*}} iter_args([[VAR:%.+]] = %{{.*}}) -> (i32)  : i32 {
-  // CHECK: [[MUL:%.+]] = comb.mul %arg0, [[VAR]] : i32
-  // CHECK: scf.yield [[MUL]] : i32
+  // CHECK: %[[ZEROVAL:.*]] = hw.constant false
+  // CHECK: %[[CONCATA:.*]] = comb.concat %[[ZEROVAL]], %arg0 : i1, i32
+  // CHECK: %[[CONCATB:.*]] = comb.concat %[[ZEROVAL]], %arg1 : i1, i32
+  // CHECK: %[[RES:.*]] = math.ipowi %[[CONCATA]], %[[CONCATB]] : i33
+  // CHECK: comb.extract %[[RES]] from 0 : (i33) -> i32
   %0 = moore.powu %arg0, %arg1 : l32
   return
 }
 
 // CHECK-LABEL: func.func @PowSOp
 func.func @PowSOp(%arg0: !moore.i32, %arg1: !moore.i32) {
-  // CHECK: [[COND:%.+]] = comb.icmp slt %arg1, %{{.*}} : i32
-  // CHECK: [[BASE:%.+]] = comb.mux [[COND]], %{{.*}}, %arg0 : i32
-  // CHECK: [[EXP:%.+]] = comb.mux [[COND]], %{{.*}}, %arg1 : i32
-
-  // CHECK: %{{.*}} = scf.for %{{.*}} = %{{.*}} to [[EXP]] step %{{.*}} iter_args([[VAR:%.+]] = %{{.*}}) -> (i32)  : i32 {
-  // CHECK: [[MUL:%.+]] = comb.mul [[BASE]], [[VAR]] : i32
-  // CHECK: scf.yield [[MUL]] : i32
+  // CHECK: %[[RES:.*]] = math.ipowi %arg0, %arg1 : i32
   %0 = moore.pows %arg0, %arg1 : i32
   return
 }
@@ -1149,15 +1145,9 @@ moore.module @blockArgAsObservedValue(in %in0: !moore.i32, in %in1: !moore.i32) 
   // CHECK: [[PRB:%.+]] = llhd.prb %var : !hw.inout<i32>
   // CHECK: llhd.process
   moore.procedure always_comb {
-    // CHECK: ^bb1:  // 2 preds: ^bb0, ^bb5
-      // CHECK: [[COND:%.+]] = comb.icmp slt %in1, %{{.*}} : i32
-      // CHECK: comb.mux [[COND]], %{{.*}}, %in0 : i32
-      // CHECK: comb.mux [[COND]], %{{.*}}, %in1 : i32
-    %0 = moore.pows %in0, %in1 : !moore.i32
-    moore.blocking_assign %var, %0 : !moore.i32
-    
-    // CHECK: ^bb5:  // pred: ^bb4
-    // CHECK:   llhd.wait (%in0, %in1, [[PRB]] : i32, i32, i32), ^bb1
-    moore.return
+      %0 = moore.add %in0, %in1 : !moore.i32
+      moore.blocking_assign %var, %0 : !moore.i32
+      // CHECK:   llhd.wait (%in0, %in1, [[PRB]] : i32, i32, i32), ^bb1
+      moore.return
   }
 }

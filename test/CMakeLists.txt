@@ -18,6 +18,7 @@ set(CIRCT_TEST_DEPENDS
   FileCheck count not
   split-file
   arcilator
+  circt-capi-aig-test
   circt-capi-ir-test
   circt-capi-om-test
   circt-capi-firrtl-test
@@ -35,6 +36,7 @@ set(CIRCT_TEST_DEPENDS
   circt-translate
   circt-reduce
   handshake-runner
+  firld
   firtool
   hlstool
   kanagawatool

@@ -1,4 +1,4 @@
-; RUN: firtool %s -disable-all-randomization -split-input-file -advanced-layer-sink -lowering-options=emittedLineLength=1024 | FileCheck %s
+; RUN: firtool %s -disable-all-randomization -split-input-file -lowering-options=emittedLineLength=1024 | FileCheck %s
 
 ; This is an end-to-end example of a test-bench (Foo) enabling verification,
 ; probing into a device-under-test (Bar), and reading from hardware which is
@@ -302,7 +302,11 @@ circuit Foo:
   layer A, bind, "A":
   layer B, bind, "B":
 
+  extmodule Baz:
+
   public module Bar:
+    ; This instance of an extmodule prevents Foo/bar from being DCE'd.
+    inst baz of Baz
 
   public module Foo:
     inst bar of Bar

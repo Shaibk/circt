@@ -11,7 +11,7 @@ firrtl.circuit "Test" {
   }
   firrtl.layer @B bind {}
 
-  firrtl.extmodule @Foo(out o : !firrtl.probe<uint<1>, @A>)
+  firrtl.extmodule @Foo(out o : !firrtl.probe<uint<1>, @A>) attributes {knownLayers=[@A]}
 
   //===--------------------------------------------------------------------===//
   // Removal of Probe Colors
@@ -21,7 +21,7 @@ firrtl.circuit "Test" {
   firrtl.module @ColoredPorts(out %o: !firrtl.probe<uint<1>, @A>) {}
 
   // CHECK-LABEL: @ExtColoredPorts(out o: !firrtl.probe<uint<1>>)
-  firrtl.extmodule @ExtColoredPorts(out o: !firrtl.probe<uint<1>, @A>)
+  firrtl.extmodule @ExtColoredPorts(out o: !firrtl.probe<uint<1>, @A>) attributes {knownLayers=[@A]}
 
   // CHECK-LABEL: @ColoredPortsOnInstances
   firrtl.module @ColoredPortsOnInstances() {
@@ -138,6 +138,7 @@ firrtl.circuit "Test" {
   // CHECK-NEXT:   %w_probe = firrtl.node sym @sym interesting_name %w : !firrtl.uint<1>
   // CHECK-NEXT:   firrtl.instance {{.+}} {doNotPrint, output_file = #hw.output_file<"layers-CaptureProbeSrc-A.sv", excludeFromFileList>} @CaptureProbeSrc_A
   // CHECK-NEXT: }
+  hw.hierpath private @xmrPath [@CaptureProbeSrc::@sym]
   firrtl.module @CaptureProbeSrc() {
     %w = firrtl.wire : !firrtl.uint<1>
     %w_probe = firrtl.node sym @sym interesting_name %w : !firrtl.uint<1>
@@ -310,13 +311,13 @@ firrtl.circuit "Test" {
   // XMR Ref ops used by force_initial are cloned.
   //
   // CHECK:      firrtl.module private @XmrRef_A()
-  // CHECK-NEXT:   %0 = firrtl.xmr.ref @RefXmrRef_path : !firrtl.rwprobe<uint<1>, @A>
+  // CHECK-NEXT:   %0 = firrtl.xmr.ref @XmrRef_path : !firrtl.rwprobe<uint<1>, @A>
   // CHECK-NEXT:   %a = firrtl.wire
   // CHECK-NEXT:   %c1_ui1 = firrtl.constant 1
   // CHECK-NEXT:   firrtl.ref.force_initial %c1_ui1, %0, %c1_ui1
   hw.hierpath private @XmrRef_path [@XmrRef::@a]
   firrtl.module @XmrRef() {
-    %0 = firrtl.xmr.ref @RefXmrRef_path : !firrtl.rwprobe<uint<1>, @A>
+    %0 = firrtl.xmr.ref @XmrRef_path : !firrtl.rwprobe<uint<1>, @A>
     firrtl.layerblock @A {
       %a = firrtl.wire sym @a : !firrtl.uint<1>
       %c1_ui1 = firrtl.constant 1 : !firrtl.const.uint<1>
@@ -709,3 +710,61 @@ firrtl.circuit "Top" {
   }
 }
 
+// -----
+
+// Check that only known bound-in layers are included.
+firrtl.circuit "Top" {
+  firrtl.layer @Layer bind {}
+
+  firrtl.extmodule @ComponentA() attributes {knownLayers=[@Layer]}
+  firrtl.extmodule @ComponentB() attributes {knownLayers=[]}
+  // There should only be one include statement.
+  // CHECK:     emit.file "layers-Top-Layer.sv"
+  // CHECK:     sv.include local "layers-ComponentA-Layer.sv"
+  // CHECK-NOT: sv.include local "layers-ComponentB-Layer.sv"
+  firrtl.module @Top() {
+    firrtl.instance componentA @ComponentA()
+    firrtl.instance componentB @ComponentB()
+  }
+}
+
+// -----
+
+// When an extmodule knows of a child layer, it also knows the parent. Check
+// that the parent bindfile is included. In this case, the child layer is
+// inline, so it should NOT be included.
+firrtl.circuit "Top" {
+  firrtl.layer @ParentLayer bind {
+    firrtl.layer @ChildLayer inline {}
+  }
+
+  firrtl.extmodule @Component() attributes {knownLayers=[@ParentLayer::@ChildLayer]}
+
+  // There should only be one include statement.
+  // CHECK:     emit.file "layers-Top-ParentLayer.sv"
+  // CHECK:     sv.include local "layers-Component-ParentLayer.sv"
+  // CHECK-NOT: sv.include local "layers-Component-ParentLayer-ChildLayer.sv"
+  firrtl.module public @Top() {
+    firrtl.instance component @Component()
+  }
+}
+
+// -----
+
+// When an extmodule knows of a child layer, it also knows the parent. Check
+// that the parent bindfile is included. In this case, the child layer is
+// bound-in, so it SHOULD be included too.
+firrtl.circuit "Top" {
+  firrtl.layer @ParentLayer bind {
+    firrtl.layer @ChildLayer bind {}
+  }
+
+  firrtl.extmodule @Component() attributes {knownLayers=[@ParentLayer::@ChildLayer]}
+
+  // CHECK: emit.file "layers-Top-ParentLayer.sv"
+  // CHECK: sv.include local "layers-Component-ParentLayer.sv"
+  // CHECK: sv.include local "layers-Component-ParentLayer-ChildLayer.sv"
+  firrtl.module public @Top() {
+    firrtl.instance component @Component()
+  }
+}

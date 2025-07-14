@@ -1065,12 +1065,16 @@ void FModuleOp::build(OpBuilder &builder, OperationState &result,
 
 void FExtModuleOp::build(OpBuilder &builder, OperationState &result,
                          StringAttr name, ConventionAttr convention,
-                         ArrayRef<PortInfo> ports, StringRef defnameAttr,
-                         ArrayAttr annotations, ArrayAttr parameters,
-                         ArrayAttr internalPaths, ArrayAttr layers) {
+                         ArrayRef<PortInfo> ports, ArrayAttr knownLayers,
+                         StringRef defnameAttr, ArrayAttr annotations,
+                         ArrayAttr parameters, ArrayAttr internalPaths,
+                         ArrayAttr layers) {
   buildModule<FExtModuleOp>(builder, result, name, ports, annotations, layers);
   auto &properties = result.getOrAddProperties<Properties>();
   properties.setConvention(convention);
+  if (!knownLayers)
+    knownLayers = builder.getArrayAttr({});
+  properties.setKnownLayers(knownLayers);
   if (!defnameAttr.empty())
     properties.setDefname(builder.getStringAttr(defnameAttr));
   if (!parameters)
@@ -1349,7 +1353,7 @@ static void printFModuleLikeOp(OpAsmPrinter &p, FModuleLike op) {
       p, body, op.getPortDirectionsAttr(), op.getPortNames(), op.getPortTypes(),
       op.getPortAnnotations(), op.getPortSymbols(), op.getPortLocations());
 
-  SmallVector<StringRef, 12> omittedAttrs = {
+  SmallVector<StringRef, 13> omittedAttrs = {
       "sym_name",    "portDirections", "portTypes",  "portAnnotations",
       "portSymbols", "portLocations",  "parameters", visibilityAttrName};
 
@@ -1364,6 +1368,11 @@ static void printFModuleLikeOp(OpAsmPrinter &p, FModuleLike op) {
   // If there are no annotations we can omit the empty array.
   if (op->getAttrOfType<ArrayAttr>("annotations").empty())
     omittedAttrs.push_back("annotations");
+
+  // If there are no known layers, then omit the empty array.
+  if (auto knownLayers = op->getAttrOfType<ArrayAttr>("knownLayers"))
+    if (knownLayers.empty())
+      omittedAttrs.push_back("knownLayers");
 
   // If there are no enabled layers, then omit the empty array.
   if (auto layers = op->getAttrOfType<ArrayAttr>("layers"))
@@ -1552,6 +1561,7 @@ ParseResult FExtModuleOp::parse(OpAsmParser &parser, OperationState &result) {
   auto &properties = result.getOrAddProperties<Properties>();
   properties.setConvention(
       ConventionAttr::get(result.getContext(), Convention::Internal));
+  properties.setKnownLayers(ArrayAttr::get(result.getContext(), {}));
   return success();
 }
 
@@ -1621,8 +1631,6 @@ LogicalResult FExtModuleOp::verify() {
     return failure();
 
   auto params = getParameters();
-  if (params.empty())
-    return success();
 
   auto checkParmValue = [&](Attribute elt) -> bool {
     auto param = cast<ParamDeclAttr>(elt);
@@ -1636,6 +1644,28 @@ LogicalResult FExtModuleOp::verify() {
 
   if (!llvm::all_of(params, checkParmValue))
     return failure();
+
+  // Verify that any mentioned layers are marked as known.
+  LayerSet known;
+  known.insert_range(getKnownLayersAttr().getAsRange<SymbolRefAttr>());
+
+  LayerSet referenced;
+  referenced.insert_range(getLayersAttr().getAsRange<SymbolRefAttr>());
+  for (auto attr : getPortTypes()) {
+    auto type = cast<TypeAttr>(attr).getValue();
+    if (auto refType = type_dyn_cast<RefType>(type))
+      if (auto layer = refType.getLayer())
+        referenced.insert(layer);
+  }
+
+  SmallVector<SymbolRefAttr> missing;
+  if (!isLayerSetCompatibleWith(referenced, known, missing)) {
+    auto diag = emitOpError("references unknown layers");
+    auto &note = diag.attachNote();
+    note << "unknown layers: ";
+    interleaveComma(missing, note);
+    return failure();
+  }
 
   return success();
 }
@@ -1719,14 +1749,13 @@ static LogicalResult verifyPortSymbolUses(FModuleLike module,
 }
 
 LogicalResult FModuleOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  if (failed(
-          verifyPortSymbolUses(cast<FModuleLike>(getOperation()), symbolTable)))
+  if (failed(verifyPortSymbolUses(*this, symbolTable)))
     return failure();
 
-  auto circuitOp = (*this)->getParentOfType<CircuitOp>();
+  auto circuitOp = getOperation()->getParentOfType<CircuitOp>();
   for (auto layer : getLayers()) {
     if (!symbolTable.lookupSymbolIn(circuitOp, cast<SymbolRefAttr>(layer)))
-      return emitOpError() << "enables unknown layer '" << layer << "'";
+      return emitOpError() << "enables undefined layer '" << layer << "'";
   }
 
   return success();
@@ -1734,17 +1763,30 @@ LogicalResult FModuleOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
 LogicalResult
 FExtModuleOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifyPortSymbolUses(cast<FModuleLike>(getOperation()), symbolTable);
+  if (failed(verifyPortSymbolUses(*this, symbolTable)))
+    return failure();
+
+  auto circuitOp = getOperation()->getParentOfType<CircuitOp>();
+  for (auto layer : getKnownLayersAttr().getAsRange<SymbolRefAttr>()) {
+    if (!symbolTable.lookupSymbolIn(circuitOp, layer))
+      return emitOpError() << "knows undefined layer '" << layer << "'";
+  }
+  for (auto layer : getLayersAttr().getAsRange<SymbolRefAttr>()) {
+    if (!symbolTable.lookupSymbolIn(circuitOp, layer))
+      return emitOpError() << "enables undefined layer '" << layer << "'";
+  }
+
+  return success();
 }
 
 LogicalResult
 FIntModuleOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifyPortSymbolUses(cast<FModuleLike>(getOperation()), symbolTable);
+  return verifyPortSymbolUses(*this, symbolTable);
 }
 
 LogicalResult
 FMemModuleOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifyPortSymbolUses(cast<FModuleLike>(getOperation()), symbolTable);
+  return verifyPortSymbolUses(*this, symbolTable);
 }
 
 void FModuleOp::getAsmBlockArgumentNames(mlir::Region &region,
@@ -5096,16 +5138,47 @@ FIRRTLType impl::inferComparisonResult(FIRRTLType lhs, FIRRTLType rhs,
   return UIntType::get(lhs.getContext(), 1, isConst(lhs) && isConst(rhs));
 }
 
-FIRRTLType CatPrimOp::inferReturnType(FIRRTLType lhs, FIRRTLType rhs,
+FIRRTLType CatPrimOp::inferReturnType(ValueRange operands, DictionaryAttr attrs,
+                                      OpaqueProperties properties,
+                                      mlir::RegionRange regions,
                                       std::optional<Location> loc) {
-  int32_t lhsWidth, rhsWidth, resultWidth = -1;
-  bool isConstResult = false;
-  if (!isSameIntTypeKind(lhs, rhs, lhsWidth, rhsWidth, isConstResult, loc))
-    return {};
+  // If no operands, return a 0-bit UInt
+  if (operands.empty())
+    return UIntType::get(attrs.getContext(), 0);
 
-  if (lhsWidth != -1 && rhsWidth != -1)
-    resultWidth = lhsWidth + rhsWidth;
-  return UIntType::get(lhs.getContext(), resultWidth, isConstResult);
+  // Check that all operands are Int types with same signedness
+  bool isSigned = type_isa<SIntType>(operands[0].getType());
+  for (auto operand : operands) {
+    auto type = type_dyn_cast<IntType>(operand.getType());
+    if (!type)
+      return emitInferRetTypeError(loc, "all operands must be Int type");
+    if (type.isSigned() != isSigned)
+      return emitInferRetTypeError(loc,
+                                   "all operands must have same signedness");
+  }
+
+  // Calculate the total width and determine if result is const
+  int32_t resultWidth = 0;
+  bool isConstResult = true;
+
+  for (auto operand : operands) {
+    auto type = type_cast<IntType>(operand.getType());
+    int32_t width = type.getWidthOrSentinel();
+
+    // If any width is unknown, the result width is unknown
+    if (width == -1) {
+      resultWidth = -1;
+    }
+
+    if (resultWidth != -1)
+      resultWidth += width;
+
+    // Result is const only if all operands are const
+    isConstResult &= type.isConst();
+  }
+
+  // Create and return the result type
+  return UIntType::get(attrs.getContext(), resultWidth, isConstResult);
 }
 
 FIRRTLType DShlPrimOp::inferReturnType(FIRRTLType lhs, FIRRTLType rhs,
@@ -6229,30 +6302,10 @@ LogicalResult RWProbeOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
     }
     return success();
   };
-
-  auto checkLayers = [&](Location loc) -> LogicalResult {
-    auto dstLayers = getAmbientLayersAt(target.getOp());
-    auto srcLayers = getLayersFor(getResult());
-    SmallVector<SymbolRefAttr> missingLayers;
-    if (!isLayerSetCompatibleWith(srcLayers, dstLayers, missingLayers)) {
-      auto diag = emitOpError("target has insufficient layer requirements");
-      auto &note = diag.attachNote(loc);
-      note << "target is missing layer requirements: ";
-      llvm::interleaveComma(missingLayers, note);
-      return failure();
-    }
-    return success();
-  };
-  auto checks = [&](auto type, Location loc) {
-    if (failed(checkLayers(loc)))
-      return failure();
-    return checkFinalType(type, loc);
-  };
-
   if (target.isPort()) {
     auto mod = cast<FModuleLike>(target.getOp());
-    return checks(mod.getPortType(target.getPort()),
-                  mod.getPortLocation(target.getPort()));
+    return checkFinalType(mod.getPortType(target.getPort()),
+                          mod.getPortLocation(target.getPort()));
   }
   hw::InnerSymbolOpInterface symOp =
       cast<hw::InnerSymbolOpInterface>(target.getOp());
@@ -6266,7 +6319,31 @@ LogicalResult RWProbeOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
     return emitOpError("is not dominated by target")
         .attachNote(symOp.getLoc())
         .append("target here");
-  return checks(symOp.getTargetResult().getType(), symOp.getLoc());
+  return checkFinalType(symOp.getTargetResult().getType(), symOp.getLoc());
+}
+
+LogicalResult XMRRefOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto *target = symbolTable.lookupNearestSymbolFrom(*this, getRefAttr());
+  if (!target)
+    return emitOpError("has an invalid symbol reference");
+
+  if (!isa<hw::HierPathOp>(target))
+    return emitOpError("does not target a hierpath op");
+
+  // TODO: Verify that the target's type matches the type of this op.
+  return success();
+}
+
+LogicalResult XMRDerefOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto *target = symbolTable.lookupNearestSymbolFrom(*this, getRefAttr());
+  if (!target)
+    return emitOpError("has an invalid symbol reference");
+
+  if (!isa<hw::HierPathOp>(target))
+    return emitOpError("does not target a hierpath op");
+
+  // TODO: Verify that the target's type matches the type of this op.
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

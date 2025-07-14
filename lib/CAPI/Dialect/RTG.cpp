@@ -10,6 +10,8 @@
 #include "circt/Dialect/RTG/IR/RTGAttributes.h"
 #include "circt/Dialect/RTG/IR/RTGDialect.h"
 #include "circt/Dialect/RTG/IR/RTGTypes.h"
+#include "circt/Dialect/RTG/Transforms/RTGPassPipelines.h"
+#include "circt/Dialect/RTG/Transforms/RTGPasses.h"
 
 #include "mlir/CAPI/Registration.h"
 
@@ -21,6 +23,11 @@ using namespace circt::rtg;
 //===----------------------------------------------------------------------===//
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(RTG, rtg, RTGDialect)
+
+void registerRTGPasses() {
+  circt::rtg::registerPasses();
+  circt::rtg::registerPipelines();
+}
 
 //===----------------------------------------------------------------------===//
 // Type API.

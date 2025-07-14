@@ -15,6 +15,7 @@
 #include "circt/Dialect/Debug/DebugOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/IR/LLHDOps.h"
+#include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Moore/MooreOps.h"
 #include "circt/Dialect/Sim/SimOps.h"
 #include "circt/Dialect/Verif/VerifOps.h"
@@ -22,6 +23,7 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/Iterators.h"
@@ -1222,7 +1224,8 @@ struct CondBranchOpConversion : public OpConversionPattern<cf::CondBranchOp> {
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<cf::CondBranchOp>(
         op, adaptor.getCondition(), adaptor.getTrueDestOperands(),
-        adaptor.getFalseDestOperands(), op.getTrueDest(), op.getFalseDest());
+        adaptor.getFalseDestOperands(), /*branch_weights=*/nullptr,
+        op.getTrueDest(), op.getFalseDest());
     return success();
   }
 };
@@ -1322,29 +1325,18 @@ struct PowUOpConversion : public OpConversionPattern<PowUOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getResult().getType());
 
-    Location loc = op.getLoc();
-    auto intType = cast<IntType>(op.getRhs().getType());
+    Location loc = op->getLoc();
 
-    // transform a ** b into scf.for 0 to b step 1 { init *= a }, init = 1
-    Type integerType = rewriter.getIntegerType(intType.getWidth());
-    Value lowerBound = rewriter.create<hw::ConstantOp>(loc, integerType, 0);
-    Value upperBound =
-        rewriter.create<ConversionOp>(loc, integerType, op.getRhs());
-    Value step = rewriter.create<hw::ConstantOp>(loc, integerType, 1);
+    Value zeroVal = rewriter.create<hw::ConstantOp>(loc, APInt(1, 0));
+    // zero extend both LHS & RHS to ensure the unsigned integers are
+    // interpreted correctly when calculating power
+    auto lhs = rewriter.create<comb::ConcatOp>(loc, zeroVal, adaptor.getLhs());
+    auto rhs = rewriter.create<comb::ConcatOp>(loc, zeroVal, adaptor.getRhs());
 
-    Value initVal = rewriter.create<hw::ConstantOp>(loc, resultType, 1);
-    Value lhsVal = rewriter.create<ConversionOp>(loc, resultType, op.getLhs());
+    // lower the exponentiation via MLIR's math dialect
+    auto pow = rewriter.create<mlir::math::IPowIOp>(loc, lhs, rhs);
 
-    auto forOp = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange(initVal),
-        [&](OpBuilder &builder, Location loc, Value i, ValueRange iterArgs) {
-          Value loopVar = iterArgs.front();
-          Value mul = rewriter.create<comb::MulOp>(loc, lhsVal, loopVar);
-          rewriter.create<scf::YieldOp>(loc, ValueRange(mul));
-        });
-
-    rewriter.replaceOp(op, forOp.getResult(0));
-
+    rewriter.replaceOpWithNewOp<comb::ExtractOp>(op, resultType, pow, 0);
     return success();
   }
 };
@@ -1357,37 +1349,10 @@ struct PowSOpConversion : public OpConversionPattern<PowSOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getResult().getType());
 
-    Location loc = op.getLoc();
-    auto intType = cast<IntType>(op.getRhs().getType());
-    // transform a ** b into scf.for 0 to b step 1 { init *= a }, init = 1
-    Type integerType = rewriter.getIntegerType(intType.getWidth());
-    Value lhsVal = rewriter.create<ConversionOp>(loc, resultType, op.getLhs());
-    Value rhsVal = rewriter.create<ConversionOp>(loc, integerType, op.getRhs());
-    Value constZero = rewriter.create<hw::ConstantOp>(loc, integerType, 0);
-    Value constZeroResult = rewriter.create<hw::ConstantOp>(loc, resultType, 0);
-    Value isNegative = rewriter.create<comb::ICmpOp>(loc, ICmpPredicate::slt,
-                                                     rhsVal, constZero);
-
-    // if the exponent is negative, return 0
-    lhsVal =
-        rewriter.create<comb::MuxOp>(loc, isNegative, constZeroResult, lhsVal);
-    Value upperBound =
-        rewriter.create<comb::MuxOp>(loc, isNegative, constZero, rhsVal);
-
-    Value lowerBound = constZero;
-    Value step = rewriter.create<hw::ConstantOp>(loc, integerType, 1);
-    Value initVal = rewriter.create<hw::ConstantOp>(loc, resultType, 1);
-
-    auto forOp = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange(initVal),
-        [&](OpBuilder &builder, Location loc, Value i, ValueRange iterArgs) {
-          auto loopVar = iterArgs.front();
-          auto mul = rewriter.create<comb::MulOp>(loc, lhsVal, loopVar);
-          rewriter.create<scf::YieldOp>(loc, ValueRange(mul));
-        });
-
-    rewriter.replaceOp(op, forOp.getResult(0));
-
+    // utilize MLIR math dialect's math.ipowi to handle the exponentiation of
+    // expression
+    rewriter.replaceOpWithNewOp<mlir::math::IPowIOp>(
+        op, resultType, adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };
@@ -1630,7 +1595,9 @@ static void populateLegality(ConversionTarget &target,
   target.addLegalDialect<comb::CombDialect>();
   target.addLegalDialect<hw::HWDialect>();
   target.addLegalDialect<llhd::LLHDDialect>();
+  target.addLegalDialect<ltl::LTLDialect>();
   target.addLegalDialect<mlir::BuiltinDialect>();
+  target.addLegalDialect<mlir::math::MathDialect>();
   target.addLegalDialect<sim::SimDialect>();
   target.addLegalDialect<verif::VerifDialect>();
 

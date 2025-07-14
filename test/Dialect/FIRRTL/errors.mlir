@@ -352,9 +352,38 @@ firrtl.circuit "InstanceCannotHavePortSymbols" {
 
 // -----
 
+firrtl.circuit "ExtModuleKnowsOfMissingLayer" {
+  // expected-error @below {{op knows undefined layer '@A'}}
+  firrtl.extmodule @Ext() attributes {knownLayers=[@A]}
+}
+
+// -----
+
+firrtl.circuit "ExtModuleUsesUnknownLayerInProbeColor" {
+  firrtl.layer @A bind {}
+
+  // expected-error @below {{op references unknown layers}}
+  // expected-note  @below {{unknown layers: @A}}
+  firrtl.extmodule @Ext(out p: !firrtl.probe<uint<1>, @A>)
+
+}
+
+// -----
+
+firrtl.circuit "ExtModuleUseUnkownLayerInEnableLayerSpec" {
+  firrtl.layer @A bind {}
+
+  // expected-error @below {{op references unknown layers}}
+  // expected-note  @below {{unknown layers: @A}}
+  firrtl.extmodule @Ext() attributes {layers=[@A]}
+}
+
+// -----
+
 firrtl.circuit "InstanceMissingLayers" {
+  firrtl.layer @A bind {}
   // expected-note @below {{original module declared here}}
-  firrtl.extmodule @Ext(in in : !firrtl.uint<1>) attributes {layers = [@A]}
+  firrtl.extmodule @Ext(in in : !firrtl.uint<1>) attributes {knownLayers = [@A], layers = [@A]}
   firrtl.module @InstanceMissingLayers() {
     // expected-error @below {{'firrtl.instance' op layers must be [@A], but got []}}
     %foo_in = firrtl.instance foo @Ext(in in : !firrtl.uint<1>)
@@ -1983,7 +2012,7 @@ firrtl.circuit "InvalidProbeAssociationWire_SymbolIsNotALayer" {
 // -----
 
 firrtl.circuit "UnknownEnabledLayer" {
-  // expected-error @below {{'firrtl.module' op enables unknown layer '@A'}}
+  // expected-error @below {{'firrtl.module' op enables undefined layer '@A'}}
   firrtl.module @UnknownEnabledLayer() attributes {layers = [@A]} {}
 }
 
@@ -2051,20 +2080,6 @@ firrtl.circuit "RWProbeUseDef" {
     } else {
       // expected-error @below {{not dominated by target}}
       %rw = firrtl.ref.rwprobe <@RWProbeUseDef::@x> : !firrtl.rwprobe<uint<1>>
-    }
-  }
-}
-
-// -----
-
-firrtl.circuit "RWProbeLayerRequirements" {
-  firrtl.layer @A bind { }
-  firrtl.module @RWProbeLayerRequirements(in %cond : !firrtl.uint<1>) {
-    // expected-note @below {{target is missing layer requirements: @A}}
-    %w = firrtl.wire sym @x : !firrtl.uint<1>
-    firrtl.layerblock @A {
-      // expected-error @below {{target has insufficient layer requirements}}
-      %rw = firrtl.ref.rwprobe <@RWProbeLayerRequirements::@x> : !firrtl.rwprobe<uint<1>>
     }
   }
 }
@@ -2924,4 +2939,54 @@ firrtl.circuit "BindTargetMissingDoNotPrintFlag" {
 
   // expected-error @below {{target #hw.innerNameRef<@BindTargetMissingDoNotPrintFlag::@target> is not marked doNotPrint}}
   firrtl.bind <@BindTargetMissingDoNotPrintFlag::@target>
+}
+
+// -----
+
+firrtl.circuit "InvalidCatOperands" {
+  firrtl.module @InvalidCatOperands(in %in: !firrtl.vector<uint<4>, 4>) {
+    %a = firrtl.wire : !firrtl.uint<4>
+    %b = firrtl.wire : !firrtl.sint<4>
+    // expected-error @below {{all operands must have same signedness}}
+    // expected-error @below {{'firrtl.cat' op failed to infer returned types}}
+    %result = firrtl.cat %a, %b : (!firrtl.uint<4>, !firrtl.sint<4>) -> !firrtl.uint<8>
+  }
+}
+
+// -----
+
+firrtl.circuit "XMRRefOpMissingTarget" {
+  firrtl.module @XMRRefOpMissingTarget() {
+    // expected-error @below {{op has an invalid symbol reference}}
+    %0 = firrtl.xmr.ref @MissingTarget : !firrtl.ref<uint<1>>
+  }
+}
+
+// -----
+
+firrtl.circuit "XMRRefOpTargetsNonHierPath" {
+  firrtl.extmodule @Target()
+  firrtl.module @XMRRefOpMissingTarget() {
+    // expected-error @below {{op does not target a hierpath op}}
+    %0 = firrtl.xmr.ref @Target : !firrtl.ref<uint<1>>
+  }
+}
+
+// -----
+
+firrtl.circuit "XMRDerefOpMissingTarget" {
+  firrtl.module @XMRDerefOpMissingTarget() {
+    // expected-error @below {{op has an invalid symbol reference}}
+    %0 = firrtl.xmr.deref @MissingTarget : !firrtl.uint<1>
+  }
+}
+
+// -----
+
+firrtl.circuit "XMRDerefOpTargetsNonHierPath" {
+  firrtl.extmodule @Target()
+  firrtl.module @XMRDerefOpTargetsNonHierPath() {
+    // expected-error @below {{op does not target a hierpath op}}
+    %0 = firrtl.xmr.deref @Target : !firrtl.uint<1>
+  }
 }

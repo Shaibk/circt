@@ -533,6 +533,7 @@ def ConvertMooreToCore : Pass<"convert-moore-to-core", "mlir::ModuleOp"> {
     "llhd::LLHDDialect",
     "mlir::cf::ControlFlowDialect",
     "mlir::scf::SCFDialect",
+    "mlir::math::MathDialect",
     "sim::SimDialect",
     "verif::VerifDialect",
   ];
@@ -848,5 +849,32 @@ def ConvertAIGToComb: Pass<"convert-aig-to-comb", "hw::HWModuleOp"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// ConvertCombToDatapath
+//===----------------------------------------------------------------------===//
+
+def ConvertCombToDatapath: Pass<"convert-comb-to-datapath",  "hw::HWModuleOp"> {
+  let summary = "Lower Comb ops to Datapath ops";
+  let description = [{
+    This pass converts arithmetic Comb operations into Datapath operations that 
+    leverage redundant number representations (carry save). Primarily for use
+    in the circt-synth flow.
+  }];
+  let dependentDialects = [
+    "circt::comb::CombDialect", "circt::datapath::DatapathDialect",
+    "circt::hw::HWDialect"
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvertDatapathToSMT
+//===----------------------------------------------------------------------===//
+
+def ConvertDatapathToSMT : Pass<"convert-datapath-to-smt"> {
+  let summary = "Convert datapath ops to SMT ops";
+  let dependentDialects = [
+    "mlir::smt::SMTDialect"
+  ];
+}
 
 #endif // CIRCT_CONVERSION_PASSES_TD

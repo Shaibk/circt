@@ -1855,6 +1855,7 @@ private:
   ParseResult parseIntegerLiteralExp(Value &result);
   ParseResult parseListExp(Value &result);
   ParseResult parseListConcatExp(Value &result);
+  ParseResult parseCatExp(Value &result);
 
   template <typename T, size_t M, size_t N, size_t... Ms, size_t... Ns>
   ParseResult parsePrim(std::index_sequence<Ms...>, std::index_sequence<Ns...>,
@@ -2224,6 +2225,11 @@ ParseResult FIRStmtParser::parseExpImpl(Value &result, const Twine &message,
       return failure();
     break;
 
+  case FIRToken::lp_cat:
+    if (parseCatExp(result))
+      return failure();
+    break;
+
     // Otherwise there are a bunch of keywords that are treated as identifiers
     // try them.
   case FIRToken::identifier: // exp ::= id
@@ -2587,6 +2593,33 @@ ParseResult FIRStmtParser::parseListConcatExp(Value &result) {
 
   locationProcessor.setLoc(loc);
   result = builder.create<ListConcatOp>(type, operands);
+  return success();
+}
+
+/// cat-exp ::= 'cat(' exp* ')'
+ParseResult FIRStmtParser::parseCatExp(Value &result) {
+  consumeToken(FIRToken::lp_cat);
+
+  auto loc = getToken().getLoc();
+  SmallVector<Value, 3> operands;
+  if (parseListUntil(FIRToken::r_paren, [&]() -> ParseResult {
+        Value operand;
+        locationProcessor.setLoc(loc);
+        if (parseExp(operand, "expected expression in cat expression"))
+          return failure();
+
+        operands.push_back(operand);
+        return success();
+      }))
+    return failure();
+
+  if (operands.size() != 2) {
+    if (requireFeature(nextFIRVersion, "variadic cat", loc))
+      return failure();
+  }
+
+  locationProcessor.setLoc(loc);
+  result = builder.create<CatPrimOp>(operands);
   return success();
 }
 
@@ -5102,7 +5135,13 @@ private:
   ParseResult parseFormalLike(CircuitOp circuit, unsigned indent);
 
   ParseResult parseLayerName(SymbolRefAttr &result);
-  ParseResult parseOptionalEnabledLayers(ArrayAttr &result);
+  ParseResult parseLayerList(SmallVectorImpl<Attribute> &result);
+  ParseResult parseEnableLayerSpec(SmallVectorImpl<Attribute> &result);
+  ParseResult parseKnownLayerSpec(SmallVectorImpl<Attribute> &result);
+  ParseResult parseModuleLayerSpec(ArrayAttr &enabledLayers);
+  ParseResult parseExtModuleLayerSpec(ArrayAttr &enabledLayers,
+                                      ArrayAttr &knownLayers);
+
   ParseResult parsePortList(SmallVectorImpl<PortInfo> &resultPorts,
                             SmallVectorImpl<SMLoc> &resultPortLocs,
                             unsigned indent);
@@ -5187,26 +5226,84 @@ ParseResult FIRCircuitParser::parseLayerName(SymbolRefAttr &result) {
   return success();
 }
 
-ParseResult FIRCircuitParser::parseOptionalEnabledLayers(ArrayAttr &result) {
-  if (getToken().getKind() != FIRToken::kw_enablelayer) {
-    result = ArrayAttr::get(getContext(), {});
-    return success();
+ParseResult FIRCircuitParser::parseModuleLayerSpec(ArrayAttr &enabledLayers) {
+  SmallVector<Attribute> enabledLayersBuffer;
+  while (true) {
+    auto tokenKind = getToken().getKind();
+    // Parse an enablelayer spec.
+    if (tokenKind == FIRToken::kw_enablelayer) {
+      if (parseEnableLayerSpec(enabledLayersBuffer))
+        return failure();
+      continue;
+    }
+    // Didn't parse a layer spec.
+    break;
   }
 
-  if (requireFeature({4, 0, 0}, "modules with layers enabled"))
-    return failure();
+  if (enabledLayersBuffer.size() != 0)
+    if (requireFeature({4, 0, 0}, "modules with layers enabled"))
+      return failure();
 
-  SmallVector<Attribute> layers;
+  enabledLayers = ArrayAttr::get(getContext(), enabledLayersBuffer);
+  return success();
+}
+
+ParseResult FIRCircuitParser::parseExtModuleLayerSpec(ArrayAttr &enabledLayers,
+                                                      ArrayAttr &knownLayers) {
+  SmallVector<Attribute> enabledLayersBuffer;
+  SmallVector<Attribute> knownLayersBuffer;
+  while (true) {
+    auto tokenKind = getToken().getKind();
+    // Parse an enablelayer spec.
+    if (tokenKind == FIRToken::kw_enablelayer) {
+      if (parseEnableLayerSpec(enabledLayersBuffer))
+        return failure();
+      continue;
+    }
+    // Parse a knownlayer spec.
+    if (tokenKind == FIRToken::kw_knownlayer) {
+      if (parseKnownLayerSpec(knownLayersBuffer))
+        return failure();
+      continue;
+    }
+    // Didn't parse a layer spec.
+    break;
+  }
+
+  if (enabledLayersBuffer.size() != 0)
+    if (requireFeature({4, 0, 0}, "extmodules with layers enabled"))
+      return failure();
+
+  if (knownLayersBuffer.size() != 0)
+    if (requireFeature(nextFIRVersion, "extmodules with known layers"))
+      return failure();
+
+  enabledLayers = ArrayAttr::get(getContext(), enabledLayersBuffer);
+  knownLayers = ArrayAttr::get(getContext(), knownLayersBuffer);
+  return success();
+}
+
+ParseResult
+FIRCircuitParser::parseLayerList(SmallVectorImpl<Attribute> &result) {
   do {
     SymbolRefAttr layer;
-    consumeToken();
     if (parseLayerName(layer))
       return failure();
-    layers.push_back(layer);
-  } while (getToken().getKind() == FIRToken::kw_enablelayer);
-
-  result = ArrayAttr::get(getContext(), layers);
+    result.push_back(layer);
+  } while (consumeIf(FIRToken::comma));
   return success();
+}
+
+ParseResult
+FIRCircuitParser::parseEnableLayerSpec(SmallVectorImpl<Attribute> &result) {
+  consumeToken(FIRToken::kw_enablelayer);
+  return parseLayerList(result);
+}
+
+ParseResult
+FIRCircuitParser::parseKnownLayerSpec(SmallVectorImpl<Attribute> &result) {
+  consumeToken(FIRToken::kw_knownlayer);
+  return parseLayerList(result);
 }
 
 /// portlist ::= port*
@@ -5508,13 +5605,14 @@ ParseResult FIRCircuitParser::parseExtClass(CircuitOp circuit,
 ParseResult FIRCircuitParser::parseExtModule(CircuitOp circuit,
                                              unsigned indent) {
   StringAttr name;
-  ArrayAttr layers;
+  ArrayAttr enabledLayers;
+  ArrayAttr knownLayers;
   SmallVector<PortInfo, 8> portList;
   SmallVector<SMLoc> portLocs;
   LocWithInfo info(getToken().getLoc(), this);
   consumeToken(FIRToken::kw_extmodule);
   if (parseId(name, "expected extmodule name") ||
-      parseOptionalEnabledLayers(layers) ||
+      parseExtModuleLayerSpec(enabledLayers, knownLayers) ||
       parseToken(FIRToken::colon, "expected ':' in extmodule definition") ||
       info.parseOptionalInfo() || parsePortList(portList, portLocs, indent))
     return failure();
@@ -5550,8 +5648,8 @@ ParseResult FIRCircuitParser::parseExtModule(CircuitOp circuit,
   auto conventionAttr = ConventionAttr::get(getContext(), convention);
   auto annotations = ArrayAttr::get(getContext(), {});
   auto extModuleOp = builder.create<FExtModuleOp>(
-      info.getLoc(), name, conventionAttr, portList, defName, annotations,
-      parameters, internalPaths, layers);
+      info.getLoc(), name, conventionAttr, portList, knownLayers, defName,
+      annotations, parameters, internalPaths, enabledLayers);
   auto visibility = isMainModule ? SymbolTable::Visibility::Public
                                  : SymbolTable::Visibility::Private;
   SymbolTable::setSymbolVisibility(extModuleOp, visibility);
@@ -5566,13 +5664,13 @@ ParseResult FIRCircuitParser::parseIntModule(CircuitOp circuit,
                                              unsigned indent) {
   StringAttr name;
   StringRef intName;
-  ArrayAttr layers;
+  ArrayAttr enabledLayers;
   SmallVector<PortInfo, 8> portList;
   SmallVector<SMLoc> portLocs;
   LocWithInfo info(getToken().getLoc(), this);
   consumeToken(FIRToken::kw_intmodule);
   if (parseId(name, "expected intmodule name") ||
-      parseOptionalEnabledLayers(layers) ||
+      parseModuleLayerSpec(enabledLayers) ||
       parseToken(FIRToken::colon, "expected ':' in intmodule definition") ||
       info.parseOptionalInfo() || parsePortList(portList, portLocs, indent) ||
       parseToken(FIRToken::kw_intrinsic, "expected 'intrinsic'") ||
@@ -5589,7 +5687,7 @@ ParseResult FIRCircuitParser::parseIntModule(CircuitOp circuit,
   auto builder = circuit.getBodyBuilder();
   builder
       .create<FIntModuleOp>(info.getLoc(), name, portList, intName, annotations,
-                            parameters, internalPaths, layers)
+                            parameters, internalPaths, enabledLayers)
       .setPrivate();
   return success();
 }
@@ -5600,12 +5698,12 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit, bool isPublic,
   StringAttr name;
   SmallVector<PortInfo, 8> portList;
   SmallVector<SMLoc> portLocs;
-  ArrayAttr layers;
+  ArrayAttr enabledLayers;
   auto modLoc = getToken().getLoc();
   LocWithInfo info(modLoc, this);
   consumeToken(FIRToken::kw_module);
   if (parseId(name, "expected module name") ||
-      parseOptionalEnabledLayers(layers) ||
+      parseModuleLayerSpec(enabledLayers) ||
       parseToken(FIRToken::colon, "expected ':' in module definition") ||
       info.parseOptionalInfo() || parsePortList(portList, portLocs, indent))
     return failure();
@@ -5637,8 +5735,9 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit, bool isPublic,
     convention = Convention::Scalarized;
   auto conventionAttr = ConventionAttr::get(getContext(), convention);
   auto builder = circuit.getBodyBuilder();
-  auto moduleOp = builder.create<FModuleOp>(info.getLoc(), name, conventionAttr,
-                                            portList, annotations, layers);
+  auto moduleOp =
+      builder.create<FModuleOp>(info.getLoc(), name, conventionAttr, portList,
+                                annotations, enabledLayers);
 
   auto visibility = isPublic ? SymbolTable::Visibility::Public
                              : SymbolTable::Visibility::Private;

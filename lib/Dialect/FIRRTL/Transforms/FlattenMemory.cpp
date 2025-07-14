@@ -177,7 +177,8 @@ struct FlattenMemoryPass
                   if ((m.index() == 0 && repeat == 0) || !catMasks)
                     catMasks = mBit;
                   else
-                    catMasks = builder.createOrFold<CatPrimOp>(mBit, catMasks);
+                    catMasks = builder.createOrFold<CatPrimOp>(
+                        ValueRange{mBit, catMasks});
               }
               realOldField = catMasks;
             }
@@ -237,7 +238,3 @@ private:
   }
 };
 } // end anonymous namespace
-
-std::unique_ptr<mlir::Pass> circt::firrtl::createFlattenMemoryPass() {
-  return std::make_unique<FlattenMemoryPass>();
-}

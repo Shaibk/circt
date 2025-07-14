@@ -1481,13 +1481,19 @@ LogicalResult InferenceMapping::mapOperation(Operation *op) {
         setExpr(op.getResult(), e);
       })
 
-      // Misc Binary Primitives
       .Case<CatPrimOp>([&](auto op) {
-        auto lhs = getExpr(op.getLhs());
-        auto rhs = getExpr(op.getRhs());
-        auto e = solver.add(lhs, rhs);
-        setExpr(op.getResult(), e);
+        if (op.getInputs().empty()) {
+          setExpr(op.getResult(), solver.known(0));
+          return;
+        }
+        auto result = getExpr(op.getInputs().front());
+        for (auto operand : op.getInputs().drop_front()) {
+          auto operandExpr = getExpr(operand);
+          result = solver.add(result, operandExpr);
+        }
+        setExpr(op.getResult(), result);
       })
+      // Misc Binary Primitives
       .Case<DShlPrimOp>([&](auto op) {
         auto lhs = getExpr(op.getLhs());
         auto rhs = getExpr(op.getRhs());
@@ -2313,8 +2319,4 @@ void InferWidthsPass::runOnOperation() {
   // Update the types with the inferred widths.
   if (failed(InferenceTypeUpdate(mapping).update(getOperation())))
     return signalPassFailure();
-}
-
-std::unique_ptr<mlir::Pass> circt::firrtl::createInferWidthsPass() {
-  return std::make_unique<InferWidthsPass>();
 }
