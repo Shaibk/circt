@@ -5907,6 +5907,11 @@ LogicalResult StmtEmitter::emitDeclaration(Operation *op) {
   auto type = value.getType();
   auto word = getVerilogDeclWord(op, emitter);
   auto isZeroBit = isZeroBitType(type);
+
+  // LocalParams always need the bitwidth, otherwise they are considered to have
+  // an unknown size.
+  bool singleBitDefaultType = !isa<LocalParamOp>(op);
+
   ps.scopedBox(isZeroBit ? PP::neverbox : PP::ibox2, [&]() {
     unsigned targetColumn = 0;
     unsigned column = 0;
@@ -5930,7 +5935,8 @@ LogicalResult StmtEmitter::emitDeclaration(Operation *op) {
     {
       llvm::raw_svector_ostream stringStream(typeString);
       emitter.printPackedType(stripUnpackedTypes(type), stringStream,
-                              op->getLoc());
+                              op->getLoc(), /*optionalAliasType=*/{},
+                              /*implicitIntType=*/true, singleBitDefaultType);
     }
     // Emit the type.
     if (maxTypeWidth > 0)
@@ -7116,10 +7122,10 @@ struct ExportVerilogPass
   void runOnOperation() override {
     // Prepare the ops in the module for emission.
     mlir::OpPassManager preparePM("builtin.module");
-    preparePM.addPass(createLegalizeAnonEnumsPass());
-    preparePM.addPass(createHWLowerInstanceChoicesPass());
+    preparePM.addPass(createLegalizeAnonEnums());
+    preparePM.addPass(createHWLowerInstanceChoices());
     auto &modulePM = preparePM.nestAny();
-    modulePM.addPass(createPrepareForEmissionPass());
+    modulePM.addPass(createPrepareForEmission());
     if (failed(runPipeline(preparePM, getOperation())))
       return signalPassFailure();
 
@@ -7298,10 +7304,10 @@ struct ExportSplitVerilogPass
   void runOnOperation() override {
     // Prepare the ops in the module for emission.
     mlir::OpPassManager preparePM("builtin.module");
-    preparePM.addPass(createHWLowerInstanceChoicesPass());
+    preparePM.addPass(createHWLowerInstanceChoices());
 
     auto &modulePM = preparePM.nest<hw::HWModuleOp>();
-    modulePM.addPass(createPrepareForEmissionPass());
+    modulePM.addPass(createPrepareForEmission());
     if (failed(runPipeline(preparePM, getOperation())))
       return signalPassFailure();
 

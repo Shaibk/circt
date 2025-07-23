@@ -465,12 +465,6 @@ def IsTagOp : FIRRTLExprOp<"istag"> {
   ];
 
   let firrtlExtraClassDeclaration = [{
-    /// Return a `FieldRef` to the accessed field.
-    FieldRef getAccessedField() {
-      return FieldRef(getInput(), firrtl::type_cast<FEnumType>(getInput().getType())
-                                            .getFieldID(getFieldIndex()));
-    }
-
     /// Return the name of the accessed field.
     StringAttr getFieldNameAttr() {
       return firrtl::type_cast<FEnumType>(getInput().getType())
@@ -509,12 +503,6 @@ def SubtagOp : FIRRTLExprOp<"subtag"> {
   ];
 
   let firrtlExtraClassDeclaration = [{
-    /// Return a `FieldRef` to the accessed field.
-    FieldRef getAccessedField() {
-      return FieldRef(getInput(), getInput().getType().base()
-                                            .getFieldID(getFieldIndex()));
-    }
-
     /// Return the name of the accessed field.
     StringAttr getFieldNameAttr() {
       return getInput().getType().base().getElementNameAttr(getFieldIndex());
@@ -540,6 +528,21 @@ def TagExtractOp : FIRRTLExprOp<"tagextract", [InferTypeOpInterface]> {
   let arguments = (ins FEnumType:$input);
   let results = (outs UIntType:$result);
   let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
+
+  let inferTypeDecl = [{
+    static FIRRTLType inferReturnType(FIRRTLType input,
+                                      std::optional<Location> loc);
+
+    static FIRRTLType inferReturnType(ValueRange operands,
+                                      DictionaryAttr attrs,
+                                      OpaqueProperties properties,
+                                      mlir::RegionRange regions,
+                                      std::optional<Location> loc) {
+      Adaptor adaptor(operands, attrs, properties, regions);
+      auto input = firrtl::type_cast<FIRRTLType>(adaptor.getInput().getType());
+      return inferReturnType(input, loc);
+    }
+  }];
 }
 
 def MultibitMuxOp : FIRRTLExprOp<"multibit_mux"> {

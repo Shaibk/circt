@@ -648,13 +648,6 @@ circt::firrtl::getFieldName(const FieldRef &fieldRef, bool nameSafe) {
       // Recurse in to the element type.
       type = vecType.getElementType();
       localID = localID - vecType.getFieldID(index);
-    } else if (auto enumType = type_dyn_cast<FEnumType>(type)) {
-      auto index = enumType.getIndexForFieldID(localID);
-      auto &element = enumType.getElements()[index];
-      name += nameSafe ? "_" : ".";
-      name += element.name.getValue();
-      type = element.type;
-      localID = localID - enumType.getFieldID(index);
     } else if (auto classType = type_dyn_cast<ClassType>(type)) {
       auto index = classType.getIndexForFieldID(localID);
       auto &element = classType.getElement(index);
@@ -747,10 +740,10 @@ void circt::firrtl::walkGroundTypes(
           }
         })
         .template Case<FEnumType>([&](FEnumType fenum) {
-          for (size_t i = 0, e = fenum.getNumElements(); i < e; ++i) {
-            fieldID++;
-            f(f, fenum.getElementType(i), isFlip);
-          }
+          // TODO: are enums aggregates or not?  Where is walkGroundTypes called
+          // from?  They are required to have passive types internally, so they
+          // don't really form an aggregate value.
+          fn(fieldID, fenum, isFlip);
         })
         .Default([&](FIRRTLBaseType groundType) {
           assert(groundType.isGround() &&
@@ -1030,20 +1023,16 @@ Type circt::firrtl::lowerType(
   }
   if (auto fenum = type_dyn_cast<FEnumType>(firType)) {
     mlir::SmallVector<hw::UnionType::FieldInfo, 8> hwfields;
-    SmallVector<Attribute> names;
     bool simple = true;
     for (auto element : fenum) {
       Type etype = lowerType(element.type, loc, getTypeDeclFn);
       if (!etype)
         return {};
       hwfields.push_back(hw::UnionType::FieldInfo{element.name, etype, 0});
-      names.push_back(element.name);
-      if (!isa<UIntType>(element.type) ||
-          element.type.getBitWidthOrSentinel() != 0)
+      if (element.type.getBitWidthOrSentinel() != 0)
         simple = false;
     }
-    auto tagTy = hw::EnumType::get(type.getContext(),
-                                   ArrayAttr::get(type.getContext(), names));
+    auto tagTy = IntegerType::get(type.getContext(), fenum.getTagWidth());
     if (simple)
       return tagTy;
     auto bodyTy = hw::UnionType::get(type.getContext(), hwfields);
